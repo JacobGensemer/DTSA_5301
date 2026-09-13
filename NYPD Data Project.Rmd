@@ -1,0 +1,127 @@
+---
+title: "NYPD Shooting Incident Data Project"
+author: "Jake Gensemer"
+date: "2026-09-08"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+library(tidyverse)
+```
+
+## Step 1: Import Data
+I will start by getting the data from the csv file in [Data.gov](https://catalog.data.gov/dataset/archived_nypd-shooting-incident-data-historic?from_hint=eyJxIjoiTllQRCBTaG9vdGluZyBJbmNpZGVudCIsInNvcnQiOiJyZWxldmFuY2UifQ%3D%3D).
+
+```{r get_data}
+#Get the ARCHIVED_NYPD Shooting Incident Data(Historic) from DATA.gov
+url <- "https://data.cityofnewyork.us/api/v3/views/833y-fsy8/export.csv?accessType=DOWNLOAD"
+``` 
+
+Next, we will read in the data and see what information we have, and determine what needs to be tidied and transformed.
+
+```{r read_data}
+histoic_data <- read_csv(url)
+```
+
+## Step 2: Clean Data
+```{r clea,_data}
+historic_data_clean <- histoic_data %>%
+    select(-X_COORD_CD, -Y_COORD_CD, -Lon_Lat, -LOC_CLASSFCTN_DESC, -JURISDICTION_CODE) %>%      mutate(
+         OCCUR_DATE = as.Date(OCCUR_DATE, format = "%m/%d/%Y"),
+         BORO = as.factor(BORO),
+         VIC_SEX = as.factor(VIC_SEX),
+         VIC_RACE = as.factor(VIC_RACE),
+         PERP_SEX = na_if(PERP_SEX, "UNKNOWN"),
+         PERP_SEX = na_if(PERP_SEX, "(null)"),
+         PERP_SEX = as.factor(PERP_SEX),
+         PERP_RACE = na_if(PERP_RACE, "UNKNOWN"),
+         PERP_RACE = na_if(PERP_RACE, "(null)"),
+         PERP_RACE = as.factor(PERP_RACE),
+         PERP_AGE_GROUP = na_if(PERP_AGE_GROUP, "UNKNOWN"),
+         PERP_AGE_GROUP = na_if(PERP_AGE_GROUP, "(null)"),
+         VIC_AGE_GROUP = na_if(VIC_AGE_GROUP, "UNKNOWN")
+         ) %>%     
+  filter(is.na(PERP_AGE_GROUP) | PERP_AGE_GROUP %in% c("<18", "18-24", "25-44", "45-64", "65+")) %>%
+    filter(is.na(VIC_AGE_GROUP) | VIC_AGE_GROUP %in% c("<18", "18-24", "25-44", "45-64", "65+")) %>%
+     mutate(
+         PERP_AGE_GROUP = as.factor(PERP_AGE_GROUP),
+         VIC_AGE_GROUP = as.factor(VIC_AGE_GROUP)
+     )
+```
+
+After reviewing the data set, I converted OCCUR_DATE to a proper Date format, changed several categorical columns (BORO, VIC_SEX, VIC_RACE, VIC_AGE_GROUP, PERP_SEX, PERP_RACE) to factors for easier grouping and visualization, and dropped several unnecessary columns for this analysis.
+
+I also replaced "UNKNOWN" values in the perpetrator and victim columns as NA, since these represent missing information rather than real categories, and filtered out a small number of invalid entries in PERP/VIC_AGE_GROUP (e.g. "1020") that were clearly data entry errors, keeping only valid age ranges.
+
+```{r cleaned_summary}
+summary(historic_data_clean)
+```
+
+
+## Step 3: Analysis
+
+First, I want to analyze how the number of incidents change over time in this data set.
+
+```{r plot_incidents_year}
+shootings_by_year <- historic_data_clean %>%
+  mutate(year = year(OCCUR_DATE)) %>%
+  count(year)
+
+ggplot(shootings_by_year, aes(x = year, y = n)) +
+  geom_line(color = "blue", linewidth = 1) +
+  geom_point(color = "blue") +
+  labs(
+    title = "NYPD Shooting Incidents by Year (2006–2024)",
+    x = "Year",
+    y = "Number of Shooting Incidents"
+  ) +
+  theme_minimal()
+```
+From the plot above, we see that there is a general decline of incidents from 2006, when the data begins, until the year 2020, where there is a sharp spike and then a steep decline in the following years. This spike of incidents seems to align with the COVID-19 pandemic, which was associated with political tension and social unrest.
+
+I am also curious if there is a certain time of day where incidents are more likely to occur. To analyze this, we can plot the incidents with respect to the time of day that each incident occurs.
+
+```{r plot_incidents_time}
+shootings_by_hour <- historic_data_clean %>%
+  mutate(hour = hour(OCCUR_TIME)) %>%
+  count(hour)
+
+ggplot(shootings_by_hour, aes(x = hour, y = n)) +
+  geom_col(fill = "red") +
+  scale_x_continuous(breaks = 0:23) +
+  labs(
+    title = "NYPD Shooting Incidents by Hour of Day",
+    x = "Hour of Day",
+    y = "Number of Shooting Incidents"
+  ) +
+  theme_minimal()
+```
+We can see that shootings are lowest in early morning (roughly 6 to 9 AM) and climb steadily through the day, peaking late at night (around 9 PM to midnight). Higher incident rates occurring later in the night is an expected result, as there are more people out, more social activity, and less visibility.
+
+These plots raise the question: Do these yearly and hourly patterns for incidents hold consistently across each borough, or do the peaks and troughs alter depending on the location within the city?
+
+An interesting model we can produce predicts whether the incident results in a fatality based on the borough, hour, and victim age group associated with the incident:
+```{r model}
+model <- glm(STATISTICAL_MURDER_FLAG ~ BORO + hour(OCCUR_TIME) + VIC_AGE_GROUP, data = historic_data_clean, family = "binomial")
+
+summary(model)
+```
+
+According to this model, victim age group is the strongest and most consistent predictor: compared to victims under 18, the odds of a fatal outcome increased steadily with age, from about 1.3x higher for ages 18 to 24 up to roughly 2.9x higher for victims 65 and older. This suggests older victims are meaningfully more likely to die from a shooting than younger victims.
+Borough has a limited effect. Only Manhattan shows a statistically significant difference from the baseline (Bronx), with somewhat lower odds of a fatal outcome. The other boroughs aren't distinguishable from the Bronx once age and time are accounted for.
+Hour of day is not a significant predictor of fatality. This is a useful contrast with the earlier time of day visualization: shootings are more frequent at night, but that timing doesn't appear to affect how likely a shooting is to be fatal once it happens.
+
+## Step 4: Conclusion
+This analysis explored the historical NYPD incident data from 2006 to 2024, focusing on the patterns of when incidents occur and what factors are associated with fatal results. Shooting incidents in New York City declined steadily from 2006 levels, with a sharp spike in 2020, aligning with the disruption of the COVID-19 pandemic, and have since declined again. Shootings are far more common late at night, likely due to increased social activity and decreased visibility.
+
+The logistic regression model showed that victim age is the strongest predictor of whether a shooting is fatal, with older victims facing substantially higher likelihood of death than younger victims. Borough location and and time of day seem to have little to no effect on mortality when age is accounted for. This suggests that timing matters more for whether a shooting occurs, while victim demographics matter more for how severe the outcome is.
+
+### Sources of Bias
+This data set only reflects incidents reported to and recorded by the NYPD, so unreported shootings aren't captured. A large share of perpetrator data is missing, likely because many perpetrators were never identified, which may skew perpetrator demographics toward cases where an arrest was made. Raw counts by borough or demographic group also don't account for population size or socioeconomic context, so differences shouldn't be read as differences in risk without further adjustment. Finally, cleaning decisions (like reassigning "UNKNOWN" values as missing) and the choice to focus on time and age patterns rather than other angles reflect analyst judgment, meaning this is one reasonable analysis on the data rather than a complete or causal conclusion.
+
+```{r info}
+print(sessionInfo())
+```
